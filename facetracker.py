@@ -1,6 +1,7 @@
 import asyncio
 import os
 import time
+import numpy as np
 from http import HTTPStatus
 from typing import Any
 
@@ -30,14 +31,32 @@ def print_result(loop: asyncio.BaseEventLoop, result: FaceLandmarkerResult, outp
     faces = []
 
     for i in range(0, len(result.facial_transformation_matrixes)):
+        inv_matrix = result.facial_transformation_matrixes[i]
+        matrix = np.linalg.inv(inv_matrix)
+        matrix = np.matmul(matrix, [[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+
+        # Convert matrix into 0-centred and take aspect into account
+        # The mediapipe matrix appears to expect rotation & translation to happen in the opposite order,
+        # so we rotate the translation here too.
+        x = matrix[0][3] - 0.5
+        y = matrix[1][3] - 0.5
+        z = matrix[2][3] - 0.5
+        matrix[0][3] = 0
+        matrix[1][3] = 0
+        matrix[2][3] = 0
+        [x, y, z, _] = np.dot(matrix, [x, y, z, 1])
+        matrix[0][3] = x * x_aspect
+        matrix[1][3] = y * y_aspect
+        matrix[2][3] = z
+
         landmarks = [{
-            "position": [landmark.x, landmark.y, landmark.z],
+            "position": [-(landmark.x - 0.5) * x_aspect, -(landmark.y - 0.5) * y_aspect, landmark.z],
             "presence": landmark.presence,
             "visibility": landmark.visibility,
         } for landmark in result.face_landmarks[i]]
         blend_shapes = {s.category_name: s.score for s in result.face_blendshapes[i]}
         faces.append({
-            "transform": result.facial_transformation_matrixes[i].transpose().ravel().tolist(),
+            "transform": matrix.transpose().ravel().tolist(),
             "landmarks": landmarks,
             "blendShapes": blend_shapes,
         })
@@ -116,6 +135,13 @@ fourcc = cam.get(cv2.CAP_PROP_FOURCC)
 width = int(cam.get(cv2.CAP_PROP_FRAME_WIDTH))
 height = int(cam.get(cv2.CAP_PROP_FRAME_HEIGHT))
 fps = cam.get(cv2.CAP_PROP_FPS)
+
+if width > height:
+    x_aspect = width / height
+    y_aspect = 1
+else:
+    x_aspect = 1
+    y_aspect = height / width
 
 interval = 1 / fps
 

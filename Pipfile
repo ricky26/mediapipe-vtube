@@ -6,6 +6,7 @@ name = "pypi"
 [packages]
 mediapipe = "*"
 aiohttp = "*"
+numpy = "*"
 
 [dev-packages]
 
