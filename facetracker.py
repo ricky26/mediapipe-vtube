@@ -1,11 +1,12 @@
 import asyncio
 import os
 import time
+from http import HTTPStatus
 from typing import Any
 
+import aiohttp
 import cv2
 import mediapipe as mp
-import msgpack
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import FaceLandmarker, FaceLandmarkerResult, FaceLandmarkerOptions, RunningMode
 
@@ -13,6 +14,16 @@ DIR = os.path.dirname(__file__)
 MODELS_DIR = os.path.join(DIR, "models")
 FACE_TASK_PATH = os.path.join(MODELS_DIR, "face_landmarker.task")
 MJPG_FOURCC = cv2.VideoWriter_fourcc('M', 'J', 'P', 'G')
+
+
+async def upload_results(result: Any):
+    try:
+        response = await client.put("/v1/faces", json=result)
+        if response.status != HTTPStatus.OK:
+            text = await response.text()
+            print(f"failed to upload faces {response.status}: {text}")
+    except aiohttp.ClientOSError:
+        pass
 
 
 def print_result(loop: asyncio.BaseEventLoop, result: FaceLandmarkerResult, output_image: mp.Image, timestamp_ms: int):
@@ -24,32 +35,42 @@ def print_result(loop: asyncio.BaseEventLoop, result: FaceLandmarkerResult, outp
             "presence": landmark.presence,
             "visibility": landmark.visibility,
         } for landmark in result.face_landmarks[i]]
-
-        # blend_shapes = [{
-        #     "index": s.index,
-        #     "score": s.score,
-        #     "displayName": s.display_name,
-        #     "categoryName": s.category_name,
-        # } for s in result.face_blendshapes[i]]
         blend_shapes = {s.category_name: s.score for s in result.face_blendshapes[i]}
         faces.append({
-            "transform": result.facial_transformation_matrixes[i].ravel().tolist(),
+            "transform": result.facial_transformation_matrixes[i].transpose().ravel().tolist(),
             "landmarks": landmarks,
             "blendShapes": blend_shapes,
         })
-
     packet = {
         "type": "faces",
         "faces": faces,
     }
-    broadcast(packet)
+    loop.create_task(upload_results(packet))
 
 
 def decode_fourcc(cc):
     return "".join([chr((int(cc) >> 8 * i) & 0xFF) for i in range(4)])
 
 
-async def track():
+async def upload_frame(width: int, height: int, data: bytes) -> bool:
+    try:
+        response = await client.put("/v1/camera",
+                                    headers={"Width": str(width), "Height": str(height)},
+                                    data=data)
+        if response.status != HTTPStatus.OK:
+            text = await response.text()
+            print(f"failed to upload camera {response.status}: {text}")
+            return False
+    except aiohttp.ClientOSError:
+        print(f"failed to connect to API, retrying")
+        await asyncio.sleep(5)
+        return False
+
+
+async def main():
+    global client
+    client = aiohttp.ClientSession("http://localhost:8888")
+
     loop = asyncio.get_event_loop()
     face_options = FaceLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=FACE_TASK_PATH),
@@ -69,77 +90,20 @@ async def track():
             now = time.monotonic()
             frame_timestamp_ms = int((now - epoch) * 1e3)
 
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=frame)
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGBA, data=frame)
             landmarker.detect_async(mp_image, frame_timestamp_ms)
 
             frame_bytes = frame.tobytes()
-            expected_frame_bytes = 3 * width * height
+            expected_frame_bytes = 4 * width * height
+            if len(frame_bytes) != expected_frame_bytes:
+                raise RuntimeError(f"Invalid frame size byte_len={len(frame_bytes)} expected {expected_frame_bytes}")
 
-            if len(frame_bytes) == expected_frame_bytes:
-                packet = {"type": "camera", "width": width, "height": height, "bytes": frame_bytes}
-                broadcast(packet)
-            else:
-                print(f"Invalid frame size byte_len={len(frame_bytes)} expected {expected_frame_bytes}")
+            await upload_frame(width, height, frame_bytes)
 
             deadline = now + interval
             sleep = deadline - time.monotonic()
             await asyncio.sleep(max(sleep, 0))
-
-
-def broadcast(packet: Any):
-    packet_bytes = msgpack.dumps(packet)
-    client_writer.write(packet_bytes)
-    # for writer in client_writers:
-    #     writer.write(packet_bytes)
-
-
-# async def handle_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-#     client_writers.append(writer)
-#     print("New connection")
-#     try:
-#         while True:
-#             size = int.from_bytes(await reader.readexactly(4))
-#             packet_bytes = await reader.readexactly(size)
-#             packet = msgpack.loads(packet_bytes)
-#             print(f"Packet from client (currently unsupported): {packet}")
-#     except asyncio.IncompleteReadError:
-#         pass
-#     except BrokenPipeError:
-#         pass
-#     finally:
-#         print("Connection lost")
-#         client_writers.remove(writer)
-#
-#
-# async def listen():
-#     server = await asyncio.start_server(handle_client, "localhost", 8888)
-#     async with server:
-#         await server.serve_forever()
-
-async def recv():
-    print("Connected")
-    try:
-        while True:
-            size = int.from_bytes(await client_reader.readexactly(4))
-            packet_bytes = await client_reader.readexactly(size)
-            packet = msgpack.loads(packet_bytes)
-            print(f"Packet from client (currently unsupported): {packet}")
-    except asyncio.IncompleteReadError:
-        pass
-    except BrokenPipeError:
-        pass
-    finally:
-        print("Connection lost")
-
-
-async def main():
-    global client_reader
-    global client_writer
-    (client_reader, client_writer) = await asyncio.open_connection("localhost", 8888)
-
-    tracking = track()
-    receiving = recv()
-    await asyncio.gather(tracking, receiving)
 
 
 cam = cv2.VideoCapture(0)
@@ -159,7 +123,6 @@ print(f"fourcc={decode_fourcc(fourcc)} width={width} height={height} fps={fps}")
 
 epoch = time.monotonic()
 last = epoch
-client_reader: asyncio.StreamReader
-client_writer: asyncio.StreamWriter
+client: aiohttp.ClientSession
 
 asyncio.run(main())
