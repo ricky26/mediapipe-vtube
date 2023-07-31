@@ -31,26 +31,16 @@ def print_result(loop: asyncio.BaseEventLoop, result: FaceLandmarkerResult, outp
     faces = []
 
     for i in range(0, len(result.facial_transformation_matrixes)):
-        inv_matrix = result.facial_transformation_matrixes[i]
-        matrix = np.linalg.inv(inv_matrix)
-        matrix = np.matmul(matrix, [[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
-
-        # Convert matrix into 0-centred and take aspect into account
-        # The mediapipe matrix appears to expect rotation & translation to happen in the opposite order,
-        # so we rotate the translation here too.
-        x = matrix[0][3] - 0.5
-        y = matrix[1][3] - 0.5
-        z = matrix[2][3] - 0.5
-        matrix[0][3] = 0
-        matrix[1][3] = 0
-        matrix[2][3] = 0
-        [x, y, z, _] = np.dot(matrix, [x, y, z, 1])
-        matrix[0][3] = x * x_aspect
-        matrix[1][3] = y * y_aspect
-        matrix[2][3] = z
+        matrix = result.facial_transformation_matrixes[i]
+        matrix[0][3] -= 0.5
+        matrix[1][3] -= 0.5
+        matrix[0][3] *= -1
+        matrix[1][3] *= -1
+        matrix[2][3] *= -1
+        matrix = np.matmul([[-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], matrix)
 
         landmarks = [{
-            "position": [-(landmark.x - 0.5) * x_aspect, -(landmark.y - 0.5) * y_aspect, landmark.z],
+            "position": [(landmark.x - 0.5) * x_aspect, -(landmark.y - 0.5) * y_aspect, landmark.z],
             "presence": landmark.presence,
             "visibility": landmark.visibility,
         } for landmark in result.face_landmarks[i]]
@@ -110,6 +100,8 @@ async def main():
             frame_timestamp_ms = int((now - epoch) * 1e3)
 
             frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+            frame = cv2.flip(frame, 1)
+
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGBA, data=frame)
             landmarker.detect_async(mp_image, frame_timestamp_ms)
 
