@@ -45,6 +45,7 @@ def print_result(loop: asyncio.BaseEventLoop, result: FaceLandmarkerResult, outp
             "visibility": landmark.visibility,
         } for landmark in result.face_landmarks[i]]
         blend_shapes = {s.category_name: s.score for s in result.face_blendshapes[i]}
+        blend_shapes["mouthPucker"] = 1 - blend_shapes["mouthPucker"]
         faces.append({
             "transform": matrix.transpose().ravel().tolist(),
             "landmarks": landmarks,
